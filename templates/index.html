@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GST Reconciliation Tool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>GST Reconciliation</h1>
+            <p>Seamlessly match your GSTR-2B with your Books</p>
+        </header>
+
+        <main class="glass-card">
+            <form id="upload-form" action="/" method="post" enctype="multipart/form-data">
+                <div class="upload-area" id="drop-zone">
+                    <div class="icon-container">
+                        <i class="fa-solid fa-cloud-arrow-up"></i>
+                    </div>
+                    <h3>Upload Excel File</h3>
+                    <p>Drag & drop your file here or <span class="browse-btn">browse</span></p>
+                    <input type="file" name="file" id="file-input" accept=".xlsx, .xls" hidden>
+                    <div class="file-info" id="file-info"></div>
+                </div>
+
+                <div class="actions">
+                    <button type="submit" class="btn-primary" id="process-btn" disabled>
+                        <span>Start Reconciliation</span>
+                        <i class="fa-solid fa-bolt"></i>
+                    </button>
+                </div>
+            </form>
+
+            <div class="flashed-messages">
+                {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                <ul class="flashes">
+                    {% for message in messages %}
+                    <li>{{ message }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+                {% endwith %}
+            </div>
+
+            <div class="processing-overlay" id="processing-overlay">
+                <div class="scanner-loader">
+                    <div class="scanner-doc">
+                        <div class="scanner-bar"></div>
+                    </div>
+                </div>
+                <p>Analyzing & Reconciling...</p>
+            </div>
+        </main>
+
+        <footer>
+            <p>&copy; 2026 GST Reco Tool. Local Secure Processing.</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+
+</html>
