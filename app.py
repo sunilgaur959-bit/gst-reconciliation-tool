@@ -91,6 +91,11 @@ def map_columns(df):
         "IGST Amount": "IGST",
         "CGST Amount": "CGST",
         "SGST Amount": "SGST",
+        
+        "GSTIN": "GSTIN",
+        "GSTIN of Supplier": "GSTIN",
+        "Supplier GSTIN": "GSTIN",
+        "GST Number": "GSTIN",
     }
     # Case insensitive mapping attempt
     new_cols = {}
@@ -153,7 +158,9 @@ def process_reconciliation(input_path, output_path):
             df["Invoice_No"] = ""
         if "Supplier_Name" not in df.columns:
              df["Supplier_Name"] = "" # Handle missing supplier name column
-        
+        if "GSTIN" not in df.columns:
+             df["GSTIN"] = ""
+             
         # Ensure regex columns are present
         for col in ["IGST", "CGST", "SGST"]:
             if col not in df.columns:
@@ -216,6 +223,7 @@ def process_reconciliation(input_path, output_path):
 
     # 6. Write Output
     drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
+    # Ensure GSTIN is kept (it's not in drop_cols, so it should be fine).
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         gstr2b.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="GSTR_2B", index=False)
         books.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="BOOKS", index=False)
@@ -253,9 +261,14 @@ def index():
                 flash(f"Error Processing File: {error}")
                 return redirect(request.url)
             
+            
             return send_file(output_path, as_attachment=True)
             
     return render_template('index.html')
+
+@app.route('/download-template')
+def download_template():
+    return send_file('static/files/gst_reco_template.xlsx', as_attachment=True, download_name='GST_Reco_Template.xlsx')
 
 if __name__ == '__main__':
     import webbrowser

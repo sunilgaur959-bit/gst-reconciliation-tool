@@ -45,6 +45,13 @@
                 </div>
             </form>
 
+            <div class="template-section">
+                <a href="{{ url_for('download_template') }}" class="btn-secondary">
+                    <i class="fa-solid fa-file-excel"></i>
+                    <span>Download Template</span>
+                </a>
+            </div>
+
             <div class="flashed-messages">
                 {% with messages = get_flashed_messages() %}
                 {% if messages %}

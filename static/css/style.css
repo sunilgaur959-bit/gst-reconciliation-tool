@@ -371,5 +371,39 @@ button.btn-primary:disabled {
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
-    letter-spacing: 1px;
-}
+
+    /* Secondary Button (Template) */
+    .template-section {
+        margin-top: 1.5rem;
+        display: flex;
+        justify-content: center;
+    }
+
+    .btn-secondary {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0.8rem 1.5rem;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #cbd5e1;
+        text-decoration: none;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: all 0.3s ease;
+        backdrop-filter: blur(4px);
+    }
+
+    .btn-secondary:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.2);
+        color: #fff;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+
+    .btn-secondary i {
+        color: #22c55e;
+        /* Excel green hint */
+    }
