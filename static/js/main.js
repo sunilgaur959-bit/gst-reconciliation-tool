@@ -186,7 +186,8 @@ uploadForm.addEventListener('submit', async function (e) {
             a.download = filename;
             document.body.appendChild(a);
             a.click();
-            window.URL.revokeObjectURL(url);
+            // Keep the URL alive so the visible Download button works
+            setTimeout(() => window.URL.revokeObjectURL(url), 600000); // Revoke after 10 mins
         } else {
             fileInfo.innerHTML = `<span style="color: #ef4444;">Server error occurred.</span>`;
         }
