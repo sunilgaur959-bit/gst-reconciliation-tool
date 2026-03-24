@@ -145,7 +145,28 @@ uploadForm.addEventListener('submit', async function (e) {
             body: formData
         });
 
-        // If the backend had an error, it redirects to the homepage and returns HTML
+        // Check if the backend returned a custom error status code like 400 or 500
+        if (!response.ok) {
+            let errorMsg = "Server error occurred.";
+            try {
+                // Try to parse the error message if the server sent one
+                const errorData = await response.json();
+                if (errorData.error) errorMsg = errorData.error;
+            } catch (jsonErr) {
+                try {
+                    const textData = await response.text();
+                    if (textData) errorMsg = textData;
+                } catch(textErr) {}
+            }
+            
+            fileInfo.innerHTML = `<div style="color: #ef4444; max-width: 100%; word-wrap: break-word; text-align: left; padding: 10px; background: rgba(255,0,0,0.1); border-radius: 8px; margin-top: 10px;">
+                <strong>Error:</strong><br/>
+                <span style="font-size: 0.85em; white-space: pre-wrap;">${errorMsg}</span>
+            </div>`;
+            return;
+        }
+        
+        // Handle when it mysteriously returns HTML (like a redirect to the home page)
         const contentType = response.headers.get('Content-Type');
         if (contentType && contentType.includes('text/html')) {
             fileInfo.innerHTML = `<span style="color: #ef4444;">Error processing file or invalid format. Refresh and try again.</span>`;
