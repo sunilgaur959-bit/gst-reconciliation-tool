@@ -129,17 +129,72 @@ function handleFiles(files) {
 }
 
 // Form Submission
-uploadForm.addEventListener('submit', function (e) {
+uploadForm.addEventListener('submit', async function (e) {
+    e.preventDefault(); // Stop natural submission
+
     // Show processing overlay
     const btnText = processBtn.querySelector('span');
     btnText.textContent = 'Processing...';
     processingOverlay.classList.add('active');
 
-    // Allow the form to submit naturally to trigger the file download
-    // A timeout to reset the UI after 'download' starts (approximate)
-    setTimeout(() => {
+    const formData = new FormData(uploadForm);
+
+    try {
+        const response = await fetch('/', {
+            method: 'POST',
+            body: formData
+        });
+
+        // If the backend had an error, it redirects to the homepage and returns HTML
+        const contentType = response.headers.get('Content-Type');
+        if (contentType && contentType.includes('text/html')) {
+            fileInfo.innerHTML = `<span style="color: #ef4444;">Error processing file or invalid format. Refresh and try again.</span>`;
+            return;
+        }
+
+        if (response.ok) {
+            const blob = await response.blob();
+            
+            // Get filename from header if possible
+            let filename = "Reconciled_GST.xlsx";
+            const disposition = response.headers.get('Content-Disposition');
+            if (disposition && disposition.indexOf('attachment') !== -1) {
+                const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+                const matches = filenameRegex.exec(disposition);
+                if (matches != null && matches[1]) { 
+                  filename = matches[1].replace(/['"]/g, '');
+                }
+            }
+
+            const url = window.URL.createObjectURL(blob);
+
+            // Create a visible download button
+            fileInfo.innerHTML = `
+                <div style="margin-top: 15px; text-align: center;">
+                    <p style="color: #4ade80; margin-bottom: 15px; font-weight: 600;">File successfully processed!</p>
+                    <a href="${url}" download="${filename}" class="btn-primary" style="display: inline-flex; text-decoration: none; width: auto; padding: 12px 24px;">
+                        <span>Download Result</span>
+                        <i class="fa-solid fa-download"></i>
+                    </a>
+                </div>
+            `;
+            
+            // We can optionally trigger the download automatically as well
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            // Keep the URL alive so the visible Download button works
+            setTimeout(() => window.URL.revokeObjectURL(url), 600000); // Revoke after 10 mins
+        } else {
+            fileInfo.innerHTML = `<span style="color: #ef4444;">Server error occurred.</span>`;
+        }
+    } catch (error) {
+        fileInfo.innerHTML = `<span style="color: #ef4444;">Network error: ${error.message}</span>`;
+    } finally {
         btnText.textContent = 'Start Reconciliation';
         processingOverlay.classList.remove('active');
-        fileInfo.innerHTML = "File processed! Check your downloads.";
-    }, 5000);
+    }
 });

@@ -235,6 +235,15 @@ def process_reconciliation(input_path, output_path):
 # ROUTES
 # ==============================
 
+@app.errorhandler(500)
+def internal_server_error(e):
+    return "A very deep server crash occurred. Please check if your file is too large for the cloud's memory.", 500
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    return f"CRITICAL CRASH TRACE:\n{traceback.format_exc()}", 500
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
