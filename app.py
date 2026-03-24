@@ -145,90 +145,91 @@ def process_reconciliation(input_path, output_path):
         # 1. Read Sheets
         gstr2b = read_sheet_safely(input_path, "GSTR_2B")
         books = read_sheet_safely(input_path, "BOOKS")
-    except Exception as e:
-        return str(e)
 
-    # 2. Normalise & Map
-    gstr2b = map_columns(normalise_columns(gstr2b))
-    books = map_columns(normalise_columns(books))
+        # 2. Normalise & Map
+        gstr2b = map_columns(normalise_columns(gstr2b))
+        books = map_columns(normalise_columns(books))
 
-    # 3. Clean Data
-    for df in [gstr2b, books]:
-        if "Invoice_No" not in df.columns:
-            df["Invoice_No"] = ""
-        if "Supplier_Name" not in df.columns:
-             df["Supplier_Name"] = "" # Handle missing supplier name column
-        if "GSTIN" not in df.columns:
-             df["GSTIN"] = ""
-             
-        # Ensure regex columns are present
-        for col in ["IGST", "CGST", "SGST"]:
-            if col not in df.columns:
-                df[col] = 0
+        # 3. Clean Data
+        for df in [gstr2b, books]:
+            if "Invoice_No" not in df.columns:
+                df["Invoice_No"] = ""
+            if "Supplier_Name" not in df.columns:
+                 df["Supplier_Name"] = "" # Handle missing supplier name column
+            if "GSTIN" not in df.columns:
+                 df["GSTIN"] = ""
+                 
+            # Ensure regex columns are present
+            for col in ["IGST", "CGST", "SGST"]:
+                if col not in df.columns:
+                    df[col] = 0
 
-        df["Invoice_No"] = df["Invoice_No"].astype(str)
-        df["Invoice_No_CLEAN"] = df["Invoice_No"].apply(clean_invoice)
-        df["Supplier_Name_CLEAN"] = df["Supplier_Name"].apply(clean_supplier)
+            df["Invoice_No"] = df["Invoice_No"].astype(str)
+            df["Invoice_No_CLEAN"] = df["Invoice_No"].apply(clean_invoice)
+            df["Supplier_Name_CLEAN"] = df["Supplier_Name"].apply(clean_supplier)
 
-        for col in ["IGST", "CGST", "SGST"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            for col in ["IGST", "CGST", "SGST"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        df["RECO_REMARK"] = "NOT MATCHED"
-        df["USED"] = False
-    
-    # 4. Tax Structure
-    gstr2b["TAX_STRUCTURE"] = gstr2b.apply(tax_structure, axis=1)
-    books["TAX_STRUCTURE"] = books.apply(tax_structure, axis=1)
+            df["RECO_REMARK"] = "NOT MATCHED"
+            df["USED"] = False
+        
+        # 4. Tax Structure
+        gstr2b["TAX_STRUCTURE"] = gstr2b.apply(tax_structure, axis=1)
+        books["TAX_STRUCTURE"] = books.apply(tax_structure, axis=1)
 
-    # 5A. Invoice Number Match
-    books_grouped = books[books["Invoice_No_CLEAN"] != ""].groupby("Invoice_No_CLEAN")
+        # 5A. Invoice Number Match
+        books_grouped = books[books["Invoice_No_CLEAN"] != ""].groupby("Invoice_No_CLEAN")
 
-    for inv_no, grp in books_grouped:
-        igst_sum = grp["IGST"].sum()
-        cgst_sum = grp["CGST"].sum()
-        sgst_sum = grp["SGST"].sum()
-        tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
+        for inv_no, grp in books_grouped:
+            igst_sum = grp["IGST"].sum()
+            cgst_sum = grp["CGST"].sum()
+            sgst_sum = grp["SGST"].sum()
+            tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
 
-        candidates = gstr2b[
-            (~gstr2b["USED"]) &
-            (gstr2b["Invoice_No_CLEAN"] == inv_no) &
-            (gstr2b["TAX_STRUCTURE"] == tax_struct)
-        ]
+            candidates = gstr2b[
+                (~gstr2b["USED"]) &
+                (gstr2b["Invoice_No_CLEAN"] == inv_no) &
+                (gstr2b["TAX_STRUCTURE"] == tax_struct)
+            ]
 
-        for j, g in candidates.iterrows():
-            if (
-                abs(g["IGST"] - igst_sum) <= TOLERANCE and
-                abs(g["CGST"] - cgst_sum) <= TOLERANCE and
-                abs(g["SGST"] - sgst_sum) <= TOLERANCE
-            ):
-                books.loc[grp.index, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+            for j, g in candidates.iterrows():
+                if (
+                    abs(g["IGST"] - igst_sum) <= TOLERANCE and
+                    abs(g["CGST"] - cgst_sum) <= TOLERANCE and
+                    abs(g["SGST"] - sgst_sum) <= TOLERANCE
+                ):
+                    books.loc[grp.index, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    break
+
+        # 5B. Fallback Match
+        unmatched_books = books[~books["USED"]]
+        for i, b in unmatched_books.iterrows():
+            candidates = gstr2b[
+                (~gstr2b["USED"]) &
+                (gstr2b["TAX_STRUCTURE"] == b["TAX_STRUCTURE"]) &
+                (abs(gstr2b["IGST"] - b["IGST"]) <= TOLERANCE) &
+                (abs(gstr2b["CGST"] - b["CGST"]) <= TOLERANCE) &
+                (abs(gstr2b["SGST"] - b["SGST"]) <= TOLERANCE)
+            ]
+
+            if len(candidates) >= 1:
+                j = candidates.index[0]
+                books.loc[i, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
                 gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-                break
 
-    # 5B. Fallback Match
-    unmatched_books = books[~books["USED"]]
-    for i, b in unmatched_books.iterrows():
-        candidates = gstr2b[
-            (~gstr2b["USED"]) &
-            (gstr2b["TAX_STRUCTURE"] == b["TAX_STRUCTURE"]) &
-            (abs(gstr2b["IGST"] - b["IGST"]) <= TOLERANCE) &
-            (abs(gstr2b["CGST"] - b["CGST"]) <= TOLERANCE) &
-            (abs(gstr2b["SGST"] - b["SGST"]) <= TOLERANCE)
-        ]
-
-        if len(candidates) >= 1:
-            j = candidates.index[0]
-            books.loc[i, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-            gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-
-    # 6. Write Output
-    drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
-    # Ensure GSTIN is kept (it's not in drop_cols, so it should be fine).
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        gstr2b.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="GSTR_2B", index=False)
-        books.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="BOOKS", index=False)
-    
-    return None # Success
+        # 6. Write Output
+        drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
+        # Ensure GSTIN is kept (it's not in drop_cols, so it should be fine).
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            gstr2b.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="GSTR_2B", index=False)
+            books.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="BOOKS", index=False)
+        
+        return None # Success
+    except Exception as e:
+        import traceback
+        return f"Error details: {str(e)}"
 
 # ==============================
 # ROUTES
@@ -247,7 +248,9 @@ def index():
             return redirect(request.url)
             
         if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
+            import uuid
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"{unique_id}_{secure_filename(file.filename)}"
             input_path = os.path.join(UPLOAD_FOLDER, filename)
             output_filename = f"Reconciled_{filename}"
             output_path = os.path.join(OUTPUT_FOLDER, output_filename)
@@ -279,4 +282,4 @@ if __name__ == '__main__':
             webbrowser.open_new('http://127.0.0.1:5000/')
 
     Timer(1, open_browser).start()
-    app.run(debug=True, port=5000)
+    app.run(host='0.0.0.0', debug=True, port=5000)
