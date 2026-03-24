@@ -149,15 +149,17 @@ uploadForm.addEventListener('submit', async function (e) {
         if (!response.ok) {
             let errorMsg = "Server error occurred.";
             try {
-                // Try to parse the error message if the server sent one
-                const errorData = await response.json();
-                if (errorData.error) errorMsg = errorData.error;
-            } catch (jsonErr) {
-                try {
-                    const textData = await response.text();
-                    if (textData) errorMsg = textData;
-                } catch(textErr) {}
-            }
+                // Read response text directly since the stream can only be read once
+                const textData = await response.text();
+                if (textData) {
+                    // Render proxy errors are usually HTML, Python errors are text
+                    if (textData.includes('<html>')) {
+                        errorMsg = "Cloud Server Error (502/504): The cloud server ran out of memory or timed out while processing your file.";
+                    } else {
+                        errorMsg = textData;
+                    }
+                }
+            } catch (err) {}
             
             fileInfo.innerHTML = `<div style="color: #ef4444; max-width: 100%; word-wrap: break-word; text-align: left; padding: 10px; background: rgba(255,0,0,0.1); border-radius: 8px; margin-top: 10px;">
                 <strong>Error:</strong><br/>
