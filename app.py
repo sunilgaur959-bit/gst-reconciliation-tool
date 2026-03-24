@@ -270,8 +270,7 @@ def index():
             error = process_reconciliation(input_path, output_path)
             
             if error:
-                flash(f"Error Processing File: {error}")
-                return redirect(request.url)
+                return f"Processing Error:\n{error}", 500
             
             
             return send_file(output_path, as_attachment=True)
