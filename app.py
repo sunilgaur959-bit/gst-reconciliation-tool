@@ -183,16 +183,31 @@ def process_reconciliation(input_path, output_path):
         
         # Build index for fast lookup: (Invoice_No_CLEAN, TAX_STRUCTURE) -> list of row indices
         gstr2b_inv_idx = defaultdict(list)
-        for j, g in gstr2b.iterrows():
-            if g["Invoice_No_CLEAN"] != "":
-                gstr2b_inv_idx[(g["Invoice_No_CLEAN"], g["TAX_STRUCTURE"])].append(j)
+        for row in gstr2b.itertuples():
+            # itertuples fields: Index, ..., Invoice_No_CLEAN, TAX_STRUCTURE
+            # We access by attribute if names are fine, or just .Index
+            inv_clean = getattr(row, "Invoice_No_CLEAN", "")
+            if inv_clean != "":
+                gstr2b_inv_idx[(inv_clean, getattr(row, "TAX_STRUCTURE", ""))].append(row.Index)
 
         books_grouped = books[books["Invoice_No_CLEAN"] != ""].groupby("Invoice_No_CLEAN")
+
+        used_gstr2b = set()
+        used_books = set()
+
+        # Track bulk updates
+        matched_books_indices = []
+        matched_gstr2b_indices = []
+
+        # Convert gstr2b to dictionaries for extremely fast property lookup instead of .loc
+        gstr2b_igst = gstr2b["IGST"].to_dict()
+        gstr2b_cgst = gstr2b["CGST"].to_dict()
+        gstr2b_sgst = gstr2b["SGST"].to_dict()
 
         for inv_no, grp in books_grouped:
             tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
             candidates_idx = gstr2b_inv_idx.get((inv_no, tax_struct), [])
-            valid_candidates = [j for j in candidates_idx if not gstr2b.at[j, "USED"]]
+            valid_candidates = [j for j in candidates_idx if j not in used_gstr2b]
 
             if not valid_candidates:
                 continue
@@ -202,42 +217,66 @@ def process_reconciliation(input_path, output_path):
             sgst_sum = grp["SGST"].sum()
 
             for j in valid_candidates:
-                g = gstr2b.loc[j]
                 if (
-                    abs(g["IGST"] - igst_sum) <= TOLERANCE and
-                    abs(g["CGST"] - cgst_sum) <= TOLERANCE and
-                    abs(g["SGST"] - sgst_sum) <= TOLERANCE
+                    abs(gstr2b_igst[j] - igst_sum) <= TOLERANCE and
+                    abs(gstr2b_cgst[j] - cgst_sum) <= TOLERANCE and
+                    abs(gstr2b_sgst[j] - sgst_sum) <= TOLERANCE
                 ):
-                    # We can use lists of indices to avoid PerformanceWarnings
                     grp_indices = list(grp.index)
-                    books.loc[grp_indices, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-                    gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    
+                    # Store matches for bulk update
+                    matched_books_indices.extend(grp_indices)
+                    matched_gstr2b_indices.append(j)
+                    
+                    # Update local tracking sets
+                    used_books.update(grp_indices)
+                    used_gstr2b.add(j)
                     break
 
         # 5B. Fallback Match
-        # Re-index remaining unused GSTR2B by TAX_STRUCTURE only
         gstr2b_tax_idx = defaultdict(list)
-        for j, g in gstr2b.iterrows():
-            if not g["USED"]:
-                gstr2b_tax_idx[g["TAX_STRUCTURE"]].append(j)
+        for row in gstr2b.itertuples():
+            if row.Index not in used_gstr2b:
+                gstr2b_tax_idx[getattr(row, "TAX_STRUCTURE", "")].append(row.Index)
 
-        unmatched_books = books[~books["USED"]]
-        for i, b in unmatched_books.iterrows():
-            tax_struct = b["TAX_STRUCTURE"]
-            igst_b, cgst_b, sgst_b = b["IGST"], b["CGST"], b["SGST"]
+        # Convert books to fast dicts for loop 5B
+        books_igst = books["IGST"].to_dict()
+        books_cgst = books["CGST"].to_dict()
+        books_sgst = books["SGST"].to_dict()
+        books_tax = books["TAX_STRUCTURE"].to_dict()
+
+        for b_idx in books.index:
+            if b_idx in used_books:
+                continue
+                
+            tax_struct = books_tax.get(b_idx, "")
+            igst_b = books_igst.get(b_idx, 0)
+            cgst_b = books_cgst.get(b_idx, 0)
+            sgst_b = books_sgst.get(b_idx, 0)
             
-            valid_candidates = [j for j in gstr2b_tax_idx.get(tax_struct, []) if not gstr2b.at[j, "USED"]]
+            valid_candidates = [j for j in gstr2b_tax_idx.get(tax_struct, []) if j not in used_gstr2b]
 
             for j in valid_candidates:
-                g = gstr2b.loc[j]
                 if (
-                    abs(g["IGST"] - igst_b) <= TOLERANCE and
-                    abs(g["CGST"] - cgst_b) <= TOLERANCE and
-                    abs(g["SGST"] - sgst_b) <= TOLERANCE
+                    abs(gstr2b_igst[j] - igst_b) <= TOLERANCE and
+                    abs(gstr2b_cgst[j] - cgst_b) <= TOLERANCE and
+                    abs(gstr2b_sgst[j] - sgst_b) <= TOLERANCE
                 ):
-                    books.loc[i, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-                    gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    matched_books_indices.append(b_idx)
+                    matched_gstr2b_indices.append(j)
+                    
+                    used_books.add(b_idx)
+                    used_gstr2b.add(j)
                     break
+
+        # Apply bulk updates instantly without row-by-row memory fragmentation
+        if matched_books_indices:
+            books.loc[matched_books_indices, "RECO_REMARK"] = "MATCHED"
+            books.loc[matched_books_indices, "USED"] = True
+        
+        if matched_gstr2b_indices:
+            gstr2b.loc[matched_gstr2b_indices, "RECO_REMARK"] = "MATCHED"
+            gstr2b.loc[matched_gstr2b_indices, "USED"] = True
 
         # 6. Write Output
         drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
@@ -263,6 +302,10 @@ def internal_server_error(e):
 def handle_exception(e):
     import traceback
     return f"CRITICAL CRASH TRACE:\n{traceback.format_exc()}", 500
+
+@app.route('/test500')
+def test500():
+    return "This is a plain text 500 error", 500
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
