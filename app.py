@@ -179,45 +179,65 @@ def process_reconciliation(input_path, output_path):
         books["TAX_STRUCTURE"] = books.apply(tax_structure, axis=1)
 
         # 5A. Invoice Number Match
+        from collections import defaultdict
+        
+        # Build index for fast lookup: (Invoice_No_CLEAN, TAX_STRUCTURE) -> list of row indices
+        gstr2b_inv_idx = defaultdict(list)
+        for j, g in gstr2b.iterrows():
+            if g["Invoice_No_CLEAN"] != "":
+                gstr2b_inv_idx[(g["Invoice_No_CLEAN"], g["TAX_STRUCTURE"])].append(j)
+
         books_grouped = books[books["Invoice_No_CLEAN"] != ""].groupby("Invoice_No_CLEAN")
 
         for inv_no, grp in books_grouped:
+            tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
+            candidates_idx = gstr2b_inv_idx.get((inv_no, tax_struct), [])
+            valid_candidates = [j for j in candidates_idx if not gstr2b.at[j, "USED"]]
+
+            if not valid_candidates:
+                continue
+
             igst_sum = grp["IGST"].sum()
             cgst_sum = grp["CGST"].sum()
             sgst_sum = grp["SGST"].sum()
-            tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
 
-            candidates = gstr2b[
-                (~gstr2b["USED"]) &
-                (gstr2b["Invoice_No_CLEAN"] == inv_no) &
-                (gstr2b["TAX_STRUCTURE"] == tax_struct)
-            ]
-
-            for j, g in candidates.iterrows():
+            for j in valid_candidates:
+                g = gstr2b.loc[j]
                 if (
                     abs(g["IGST"] - igst_sum) <= TOLERANCE and
                     abs(g["CGST"] - cgst_sum) <= TOLERANCE and
                     abs(g["SGST"] - sgst_sum) <= TOLERANCE
                 ):
-                    books.loc[grp.index, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    # We can use lists of indices to avoid PerformanceWarnings
+                    grp_indices = list(grp.index)
+                    books.loc[grp_indices, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
                     gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
                     break
 
         # 5B. Fallback Match
+        # Re-index remaining unused GSTR2B by TAX_STRUCTURE only
+        gstr2b_tax_idx = defaultdict(list)
+        for j, g in gstr2b.iterrows():
+            if not g["USED"]:
+                gstr2b_tax_idx[g["TAX_STRUCTURE"]].append(j)
+
         unmatched_books = books[~books["USED"]]
         for i, b in unmatched_books.iterrows():
-            candidates = gstr2b[
-                (~gstr2b["USED"]) &
-                (gstr2b["TAX_STRUCTURE"] == b["TAX_STRUCTURE"]) &
-                (abs(gstr2b["IGST"] - b["IGST"]) <= TOLERANCE) &
-                (abs(gstr2b["CGST"] - b["CGST"]) <= TOLERANCE) &
-                (abs(gstr2b["SGST"] - b["SGST"]) <= TOLERANCE)
-            ]
+            tax_struct = b["TAX_STRUCTURE"]
+            igst_b, cgst_b, sgst_b = b["IGST"], b["CGST"], b["SGST"]
+            
+            valid_candidates = [j for j in gstr2b_tax_idx.get(tax_struct, []) if not gstr2b.at[j, "USED"]]
 
-            if len(candidates) >= 1:
-                j = candidates.index[0]
-                books.loc[i, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
-                gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+            for j in valid_candidates:
+                g = gstr2b.loc[j]
+                if (
+                    abs(g["IGST"] - igst_b) <= TOLERANCE and
+                    abs(g["CGST"] - cgst_b) <= TOLERANCE and
+                    abs(g["SGST"] - sgst_b) <= TOLERANCE
+                ):
+                    books.loc[i, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    gstr2b.loc[j, ["RECO_REMARK", "USED"]] = ["MATCHED", True]
+                    break
 
         # 6. Write Output
         drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
