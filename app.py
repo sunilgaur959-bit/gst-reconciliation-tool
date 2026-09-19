@@ -30,37 +30,39 @@ def read_sheet_safely(file_path, sheet):
     engine = 'openpyxl' if file_path.endswith('.xlsx') else 'xlrd'
     
     try:
-        raw = pd.read_excel(file_path, sheet_name=sheet, header=None, engine=engine)
+        # Read only the first 50 rows to detect the header location quickly without memory bloat
+        raw = pd.read_excel(file_path, sheet_name=sheet, header=None, nrows=50, engine=engine)
     except ValueError:
        # Sheet not found
        raise Exception(f"Sheet '{sheet}' not found in the uploaded file.")
 
     header_row = None
-    # Look for header row in first 20 rows
-    for i in range(min(20, len(raw))):
+    # Look for header row in the first rows
+    for i in range(len(raw)):
         row_values = raw.iloc[i].astype(str).tolist()
         row_text = " ".join(row_values).lower()
         # Heuristic to find header
         if ("supplier" in row_text or "party" in row_text) and ("gst" in row_text or "invoice" in row_text):
             header_row = i
             break
-        # Fallback if just generic terms found, try to be more lenient if above fails
+        # Fallback if generic terms found
         if "supplier" in row_text or "party" in row_text:
-             header_row = i # Potential candidate, but keep looking? No, usually first match is best.
+             header_row = i
              break
 
     if header_row is None:
         # If strictly "supplier" or "party" not found, try finding "Invoice"
-        for i in range(min(20, len(raw))):
+        for i in range(len(raw)):
              row_text = " ".join(raw.iloc[i].astype(str)).lower()
              if "invoice" in row_text and ("date" in row_text or "no" in row_text):
                  header_row = i
                  break
     
     if header_row is None:
-        # Default to 0 if all else fails, but this might be risky
+        # Default to 0 if all else fails
         header_row = 0
 
+    # Read the full dataset with all entries starting from the header row
     return pd.read_excel(file_path, sheet_name=sheet, header=header_row, engine=engine)
 
 def normalise_columns(df):
@@ -302,10 +304,6 @@ def internal_server_error(e):
 def handle_exception(e):
     import traceback
     return f"CRITICAL CRASH TRACE:\n{traceback.format_exc()}", 500
-
-@app.route('/test500')
-def test500():
-    return "This is a plain text 500 error", 500
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
