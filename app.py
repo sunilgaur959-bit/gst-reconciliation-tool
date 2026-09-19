@@ -128,6 +128,11 @@ def clean_invoice(x):
     # Remove non-alphanumeric except maybe / or - if needed, but original script removed everything
     return re.sub(r"[^A-Z0-9]", "", str(x).upper())
 
+def clean_gstin(x):
+    if pd.isna(x):
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", str(x).upper().strip())
+
 def tax_structure(r):
     # Ensure columns exist, default to 0 if not
     igst = r.get("IGST", 0)
@@ -169,6 +174,7 @@ def process_reconciliation(input_path, output_path):
             df["Invoice_No"] = df["Invoice_No"].astype(str)
             df["Invoice_No_CLEAN"] = df["Invoice_No"].apply(clean_invoice)
             df["Supplier_Name_CLEAN"] = df["Supplier_Name"].apply(clean_supplier)
+            df["GSTIN_CLEAN"] = df["GSTIN"].apply(clean_gstin)
 
             for col in ["IGST", "CGST", "SGST"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -189,15 +195,18 @@ def process_reconciliation(input_path, output_path):
         gstr2b["TAX_STRUCTURE"] = compute_tax_structure(gstr2b)
         books["TAX_STRUCTURE"] = compute_tax_structure(books)
 
-        # 5A. Invoice Number Match
+        # 5A. Invoice Number Match (GSTIN + Invoice Number + Tax Structure)
         from collections import defaultdict
         
-        # Build index for fast lookup: (Invoice_No_CLEAN, TAX_STRUCTURE) -> list of row indices
-        gstr2b_inv_idx = defaultdict(list)
+        gstr2b_idx = defaultdict(list)
         for row in gstr2b.itertuples():
-            inv_clean = getattr(row, "Invoice_No_CLEAN", "")
-            if inv_clean != "":
-                gstr2b_inv_idx[(inv_clean, getattr(row, "TAX_STRUCTURE", ""))].append(row.Index)
+            inv_c = getattr(row, "Invoice_No_CLEAN", "")
+            gst_c = getattr(row, "GSTIN_CLEAN", "")
+            tax_s = getattr(row, "TAX_STRUCTURE", "")
+            if inv_c != "" and gst_c != "":
+                gstr2b_idx[(gst_c, inv_c, tax_s)].append(row.Index)
+            elif inv_c != "":
+                gstr2b_idx[("", inv_c, tax_s)].append(row.Index)
 
         used_gstr2b = set()
         used_books = set()
@@ -211,7 +220,7 @@ def process_reconciliation(input_path, output_path):
 
         valid_books = books[books["Invoice_No_CLEAN"] != ""]
         if not valid_books.empty:
-            books_grouped = valid_books.groupby("Invoice_No_CLEAN")
+            books_grouped = valid_books.groupby(["GSTIN_CLEAN", "Invoice_No_CLEAN"])
             books_agg = books_grouped.agg({
                 "IGST": "sum",
                 "CGST": "sum",
@@ -220,50 +229,57 @@ def process_reconciliation(input_path, output_path):
             })
             books_group_indices = books_grouped.indices
 
-            for inv_no, row_agg in books_agg.iterrows():
+            for (gst_c, inv_c), row_agg in books_agg.iterrows():
                 tax_struct = row_agg["TAX_STRUCTURE"]
-                candidates_idx = gstr2b_inv_idx.get((inv_no, tax_struct), [])
-                valid_candidates = [j for j in candidates_idx if j not in used_gstr2b]
-
-                if not valid_candidates:
+                candidates = [j for j in gstr2b_idx.get((gst_c, inv_c, tax_struct), []) if j not in used_gstr2b]
+                if not candidates and gst_c == "":
+                    candidates = [j for j in gstr2b_idx.get(("", inv_c, tax_struct), []) if j not in used_gstr2b]
+                if not candidates:
                     continue
 
-                igst_sum = row_agg["IGST"]
-                cgst_sum = row_agg["CGST"]
-                sgst_sum = row_agg["SGST"]
+                ig_s = row_agg["IGST"]
+                cg_s = row_agg["CGST"]
+                sg_s = row_agg["SGST"]
 
-                for j in valid_candidates:
+                for j in candidates:
                     if (
-                        abs(gstr2b_igst[j] - igst_sum) <= TOLERANCE and
-                        abs(gstr2b_cgst[j] - cgst_sum) <= TOLERANCE and
-                        abs(gstr2b_sgst[j] - sgst_sum) <= TOLERANCE
+                        abs(gstr2b_igst[j] - ig_s) <= TOLERANCE and
+                        abs(gstr2b_cgst[j] - cg_s) <= TOLERANCE and
+                        abs(gstr2b_sgst[j] - sg_s) <= TOLERANCE
                     ):
-                        grp_indices = list(books_group_indices[inv_no])
-                        matched_books_indices.extend(grp_indices)
+                        grp = list(books_group_indices[(gst_c, inv_c)])
+                        matched_books_indices.extend(grp)
                         matched_gstr2b_indices.append(j)
-                        used_books.update(grp_indices)
+                        used_books.update(grp)
                         used_gstr2b.add(j)
                         break
 
-        # 5B. Fallback Match with O(1) tax-amount bucketing
-        gstr2b_tax_buckets = defaultdict(list)
+        # 5B. Fallback Match: Within the SAME Supplier (GSTIN) by Tax Amount
+        gstr2b_gstin_tax_buckets = defaultdict(list)
         for row in gstr2b.itertuples():
             if row.Index not in used_gstr2b:
-                key = (
-                    getattr(row, "TAX_STRUCTURE", ""),
-                    int(round(gstr2b_igst[row.Index])),
-                    int(round(gstr2b_cgst[row.Index])),
-                    int(round(gstr2b_sgst[row.Index]))
-                )
-                gstr2b_tax_buckets[key].append(row.Index)
+                gst_c = getattr(row, "GSTIN_CLEAN", "")
+                if gst_c != "":
+                    key = (
+                        gst_c,
+                        getattr(row, "TAX_STRUCTURE", ""),
+                        int(round(gstr2b_igst[row.Index])),
+                        int(round(gstr2b_cgst[row.Index])),
+                        int(round(gstr2b_sgst[row.Index]))
+                    )
+                    gstr2b_gstin_tax_buckets[key].append(row.Index)
 
         books_igst = books["IGST"].to_dict()
         books_cgst = books["CGST"].to_dict()
         books_sgst = books["SGST"].to_dict()
         books_tax = books["TAX_STRUCTURE"].to_dict()
+        books_gstin = books["GSTIN_CLEAN"].to_dict()
 
         for b_idx in books.index:
             if b_idx in used_books:
+                continue
+            gst_c = books_gstin.get(b_idx, "")
+            if not gst_c:
                 continue
 
             tax_struct = books_tax.get(b_idx, "")
@@ -279,8 +295,8 @@ def process_reconciliation(input_path, output_path):
             for d_i in (0, -1, 1):
                 for d_c in (0, -1, 1):
                     for d_s in (0, -1, 1):
-                        search_key = (tax_struct, round_ig + d_i, round_cg + d_c, round_sg + d_s)
-                        candidates = gstr2b_tax_buckets.get(search_key)
+                        search_key = (gst_c, tax_struct, round_ig + d_i, round_cg + d_c, round_sg + d_s)
+                        candidates = gstr2b_gstin_tax_buckets.get(search_key)
                         if not candidates:
                             continue
                         for j in candidates:
@@ -314,7 +330,7 @@ def process_reconciliation(input_path, output_path):
             gstr2b.loc[matched_gstr2b_indices, "USED"] = True
 
         # 6. Write Output
-        drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "TAX_STRUCTURE", "USED"]
+        drop_cols = ["Invoice_No_CLEAN", "Supplier_Name_CLEAN", "GSTIN_CLEAN", "TAX_STRUCTURE", "USED"]
         # Ensure GSTIN is kept (it's not in drop_cols, so it should be fine).
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             gstr2b.drop(columns=drop_cols, errors="ignore").to_excel(writer, sheet_name="GSTR_2B", index=False)
