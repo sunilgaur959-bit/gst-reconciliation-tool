@@ -176,9 +176,18 @@ def process_reconciliation(input_path, output_path):
             df["RECO_REMARK"] = "NOT MATCHED"
             df["USED"] = False
         
-        # 4. Tax Structure
-        gstr2b["TAX_STRUCTURE"] = gstr2b.apply(tax_structure, axis=1)
-        books["TAX_STRUCTURE"] = books.apply(tax_structure, axis=1)
+        # 4. Tax Structure (Vectorized with numpy for near-instant execution)
+        import numpy as np
+        def compute_tax_structure(df):
+            igst = df["IGST"]
+            cgst = df["CGST"]
+            sgst = df["SGST"]
+            cond_igst = (igst > 0) & (cgst == 0) & (sgst == 0)
+            cond_cgst_sgst = (igst == 0) & (cgst > 0) & (sgst > 0)
+            return np.select([cond_igst, cond_cgst_sgst], ["IGST", "CGST_SGST"], default="OTHER")
+
+        gstr2b["TAX_STRUCTURE"] = compute_tax_structure(gstr2b)
+        books["TAX_STRUCTURE"] = compute_tax_structure(books)
 
         # 5A. Invoice Number Match
         from collections import defaultdict
@@ -186,62 +195,68 @@ def process_reconciliation(input_path, output_path):
         # Build index for fast lookup: (Invoice_No_CLEAN, TAX_STRUCTURE) -> list of row indices
         gstr2b_inv_idx = defaultdict(list)
         for row in gstr2b.itertuples():
-            # itertuples fields: Index, ..., Invoice_No_CLEAN, TAX_STRUCTURE
-            # We access by attribute if names are fine, or just .Index
             inv_clean = getattr(row, "Invoice_No_CLEAN", "")
             if inv_clean != "":
                 gstr2b_inv_idx[(inv_clean, getattr(row, "TAX_STRUCTURE", ""))].append(row.Index)
 
-        books_grouped = books[books["Invoice_No_CLEAN"] != ""].groupby("Invoice_No_CLEAN")
-
         used_gstr2b = set()
         used_books = set()
 
-        # Track bulk updates
         matched_books_indices = []
         matched_gstr2b_indices = []
 
-        # Convert gstr2b to dictionaries for extremely fast property lookup instead of .loc
         gstr2b_igst = gstr2b["IGST"].to_dict()
         gstr2b_cgst = gstr2b["CGST"].to_dict()
         gstr2b_sgst = gstr2b["SGST"].to_dict()
 
-        for inv_no, grp in books_grouped:
-            tax_struct = grp.iloc[0]["TAX_STRUCTURE"]
-            candidates_idx = gstr2b_inv_idx.get((inv_no, tax_struct), [])
-            valid_candidates = [j for j in candidates_idx if j not in used_gstr2b]
+        valid_books = books[books["Invoice_No_CLEAN"] != ""]
+        if not valid_books.empty:
+            books_grouped = valid_books.groupby("Invoice_No_CLEAN")
+            books_agg = books_grouped.agg({
+                "IGST": "sum",
+                "CGST": "sum",
+                "SGST": "sum",
+                "TAX_STRUCTURE": "first"
+            })
+            books_group_indices = books_grouped.indices
 
-            if not valid_candidates:
-                continue
+            for inv_no, row_agg in books_agg.iterrows():
+                tax_struct = row_agg["TAX_STRUCTURE"]
+                candidates_idx = gstr2b_inv_idx.get((inv_no, tax_struct), [])
+                valid_candidates = [j for j in candidates_idx if j not in used_gstr2b]
 
-            igst_sum = grp["IGST"].sum()
-            cgst_sum = grp["CGST"].sum()
-            sgst_sum = grp["SGST"].sum()
+                if not valid_candidates:
+                    continue
 
-            for j in valid_candidates:
-                if (
-                    abs(gstr2b_igst[j] - igst_sum) <= TOLERANCE and
-                    abs(gstr2b_cgst[j] - cgst_sum) <= TOLERANCE and
-                    abs(gstr2b_sgst[j] - sgst_sum) <= TOLERANCE
-                ):
-                    grp_indices = list(grp.index)
-                    
-                    # Store matches for bulk update
-                    matched_books_indices.extend(grp_indices)
-                    matched_gstr2b_indices.append(j)
-                    
-                    # Update local tracking sets
-                    used_books.update(grp_indices)
-                    used_gstr2b.add(j)
-                    break
+                igst_sum = row_agg["IGST"]
+                cgst_sum = row_agg["CGST"]
+                sgst_sum = row_agg["SGST"]
 
-        # 5B. Fallback Match
-        gstr2b_tax_idx = defaultdict(list)
+                for j in valid_candidates:
+                    if (
+                        abs(gstr2b_igst[j] - igst_sum) <= TOLERANCE and
+                        abs(gstr2b_cgst[j] - cgst_sum) <= TOLERANCE and
+                        abs(gstr2b_sgst[j] - sgst_sum) <= TOLERANCE
+                    ):
+                        grp_indices = list(books_group_indices[inv_no])
+                        matched_books_indices.extend(grp_indices)
+                        matched_gstr2b_indices.append(j)
+                        used_books.update(grp_indices)
+                        used_gstr2b.add(j)
+                        break
+
+        # 5B. Fallback Match with O(1) tax-amount bucketing
+        gstr2b_tax_buckets = defaultdict(list)
         for row in gstr2b.itertuples():
             if row.Index not in used_gstr2b:
-                gstr2b_tax_idx[getattr(row, "TAX_STRUCTURE", "")].append(row.Index)
+                key = (
+                    getattr(row, "TAX_STRUCTURE", ""),
+                    int(round(gstr2b_igst[row.Index])),
+                    int(round(gstr2b_cgst[row.Index])),
+                    int(round(gstr2b_sgst[row.Index]))
+                )
+                gstr2b_tax_buckets[key].append(row.Index)
 
-        # Convert books to fast dicts for loop 5B
         books_igst = books["IGST"].to_dict()
         books_cgst = books["CGST"].to_dict()
         books_sgst = books["SGST"].to_dict()
@@ -250,25 +265,43 @@ def process_reconciliation(input_path, output_path):
         for b_idx in books.index:
             if b_idx in used_books:
                 continue
-                
-            tax_struct = books_tax.get(b_idx, "")
-            igst_b = books_igst.get(b_idx, 0)
-            cgst_b = books_cgst.get(b_idx, 0)
-            sgst_b = books_sgst.get(b_idx, 0)
-            
-            valid_candidates = [j for j in gstr2b_tax_idx.get(tax_struct, []) if j not in used_gstr2b]
 
-            for j in valid_candidates:
-                if (
-                    abs(gstr2b_igst[j] - igst_b) <= TOLERANCE and
-                    abs(gstr2b_cgst[j] - cgst_b) <= TOLERANCE and
-                    abs(gstr2b_sgst[j] - sgst_b) <= TOLERANCE
-                ):
-                    matched_books_indices.append(b_idx)
-                    matched_gstr2b_indices.append(j)
-                    
-                    used_books.add(b_idx)
-                    used_gstr2b.add(j)
+            tax_struct = books_tax.get(b_idx, "")
+            ig_val = books_igst.get(b_idx, 0)
+            cg_val = books_cgst.get(b_idx, 0)
+            sg_val = books_sgst.get(b_idx, 0)
+
+            round_ig = int(round(ig_val))
+            round_cg = int(round(cg_val))
+            round_sg = int(round(sg_val))
+
+            found = False
+            for d_i in (0, -1, 1):
+                for d_c in (0, -1, 1):
+                    for d_s in (0, -1, 1):
+                        search_key = (tax_struct, round_ig + d_i, round_cg + d_c, round_sg + d_s)
+                        candidates = gstr2b_tax_buckets.get(search_key)
+                        if not candidates:
+                            continue
+                        for j in candidates:
+                            if j in used_gstr2b:
+                                continue
+                            if (
+                                abs(gstr2b_igst[j] - ig_val) <= TOLERANCE and
+                                abs(gstr2b_cgst[j] - cg_val) <= TOLERANCE and
+                                abs(gstr2b_sgst[j] - sg_val) <= TOLERANCE
+                            ):
+                                matched_books_indices.append(b_idx)
+                                matched_gstr2b_indices.append(j)
+                                used_books.add(b_idx)
+                                used_gstr2b.add(j)
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+                if found:
                     break
 
         # Apply bulk updates instantly without row-by-row memory fragmentation
