@@ -387,6 +387,14 @@ def index():
             
     return render_template('index.html')
 
+@app.route('/version')
+def version():
+    return {
+        "status": "online",
+        "version": "v5.0-gstin-reconcile-fix",
+        "target": "5022 matches, exact sums"
+    }
+
 @app.route('/download-template')
 def download_template():
     return send_file('static/files/gst_reco_template.xlsx', as_attachment=True, download_name='GST_Reco_Template.xlsx')
