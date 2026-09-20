@@ -147,6 +147,11 @@ def tax_structure(r):
 
 def process_reconciliation(input_path, output_path):
     TOLERANCE = 1
+    import math
+    # Consistent rounding: always round .5 UP (avoids Python's banker's rounding
+    # which can differ across versions and cause hash bucket mismatches)
+    def iround(v):
+        return int(math.floor(float(v) + 0.5))
 
     try:
         # 1. Read Sheets
@@ -263,9 +268,9 @@ def process_reconciliation(input_path, output_path):
                     key = (
                         gst_c,
                         getattr(row, "TAX_STRUCTURE", ""),
-                        int(round(gstr2b_igst[row.Index])),
-                        int(round(gstr2b_cgst[row.Index])),
-                        int(round(gstr2b_sgst[row.Index]))
+                        iround(gstr2b_igst[row.Index]),
+                        iround(gstr2b_cgst[row.Index]),
+                        iround(gstr2b_sgst[row.Index])
                     )
                     gstr2b_gstin_tax_buckets[key].append(row.Index)
 
@@ -287,9 +292,9 @@ def process_reconciliation(input_path, output_path):
             cg_val = books_cgst.get(b_idx, 0)
             sg_val = books_sgst.get(b_idx, 0)
 
-            round_ig = int(round(ig_val))
-            round_cg = int(round(cg_val))
-            round_sg = int(round(sg_val))
+            round_ig = iround(ig_val)
+            round_cg = iround(cg_val)
+            round_sg = iround(sg_val)
 
             found = False
             for d_i in (0, -1, 1):
@@ -604,6 +609,35 @@ def diagnose():
         diag["total_books_matched"] = len(matched_books_indices)
         diag["total_gstr2b_matched"] = len(matched_gstr2b_indices)
         diag["step5b_books_added"] = len(matched_books_indices) - diag["step5a_books_matched"]
+
+        # Type diagnostics
+        sample_igst_vals = list(gstr2b_igst.values())[:3]
+        diag["gstr2b_igst_val_types"] = [str(type(v).__name__) for v in sample_igst_vals]
+        diag["gstr2b_igst_val_samples"] = [float(v) for v in sample_igst_vals]
+        
+        # Index type diagnostics
+        sample_book_idx = list(books.index)[:3]
+        diag["books_index_types"] = [str(type(i).__name__) for i in sample_book_idx]
+        
+        # Check used_books type
+        sample_used = list(used_books)[:3]
+        diag["used_books_types"] = [str(type(i).__name__) for i in sample_used]
+        
+        # Bucket stats
+        diag["gstr2b_bucket_count"] = len(gstr2b_gstin_tax_buckets)
+        bucket_sizes = [len(v) for v in gstr2b_gstin_tax_buckets.values()]
+        diag["gstr2b_bucket_total_entries"] = sum(bucket_sizes)
+        
+        # Count books entries that could participate in 5B
+        eligible_5b_books = sum(1 for b_idx in books.index if b_idx not in used_books and books_gstin.get(b_idx, ""))
+        diag["eligible_5b_books"] = eligible_5b_books
+        
+        # Rounding check
+        import math
+        diag["round_22_5"] = round(22.5)
+        diag["round_2562_5"] = round(2562.5)
+        diag["floor_22_5_plus_0_5"] = int(math.floor(22.5 + 0.5))
+        diag["floor_2562_5_plus_0_5"] = int(math.floor(2562.5 + 0.5))
 
         # Cleanup
         try:
