@@ -389,11 +389,235 @@ def index():
 
 @app.route('/version')
 def version():
+    import sys, numpy as np
     return {
         "status": "online",
-        "version": "v5.0-gstin-reconcile-fix",
-        "target": "5022 matches, exact sums"
+        "version": "v6.0-diagnose",
+        "python": sys.version,
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
     }
+
+@app.route('/diagnose', methods=['POST'])
+def diagnose():
+    """Diagnostic endpoint: upload a file and get JSON match diagnostics."""
+    import sys, numpy as np, json
+    from collections import defaultdict
+
+    diag = {
+        "python": sys.version,
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
+    }
+
+    try:
+        if 'file' not in request.files:
+            return {"error": "no file"}, 400
+        file = request.files['file']
+        if not file.filename:
+            return {"error": "empty filename"}, 400
+
+        # Save temp
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"{unique_id}_{secure_filename(file.filename)}"
+        input_path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(input_path)
+
+        # Read
+        gstr2b = read_sheet_safely(input_path, "GSTR_2B")
+        books = read_sheet_safely(input_path, "BOOKS")
+        gstr2b = map_columns(normalise_columns(gstr2b))
+        books = map_columns(normalise_columns(books))
+
+        diag["gstr2b_rows"] = len(gstr2b)
+        diag["books_rows"] = len(books)
+        diag["gstr2b_cols"] = list(gstr2b.columns)
+        diag["books_cols"] = list(books.columns)
+
+        TOLERANCE = 1
+
+        # Clean
+        for df in [gstr2b, books]:
+            if "Invoice_No" not in df.columns:
+                df["Invoice_No"] = ""
+            if "Supplier_Name" not in df.columns:
+                df["Supplier_Name"] = ""
+            if "GSTIN" not in df.columns:
+                df["GSTIN"] = ""
+            for col in ["IGST", "CGST", "SGST"]:
+                if col not in df.columns:
+                    df[col] = 0
+            df["Invoice_No"] = df["Invoice_No"].astype(str)
+            df["Invoice_No_CLEAN"] = df["Invoice_No"].apply(clean_invoice)
+            df["Supplier_Name_CLEAN"] = df["Supplier_Name"].apply(clean_supplier)
+            df["GSTIN_CLEAN"] = df["GSTIN"].apply(clean_gstin)
+            for col in ["IGST", "CGST", "SGST"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df["RECO_REMARK"] = "NOT MATCHED"
+            df["USED"] = False
+
+        # Sample GSTIN_CLEAN
+        diag["books_gstin_clean_sample"] = books["GSTIN_CLEAN"].head(10).tolist()
+        diag["gstr2b_gstin_clean_sample"] = gstr2b["GSTIN_CLEAN"].head(10).tolist()
+        diag["books_gstin_clean_empty_count"] = int((books["GSTIN_CLEAN"] == "").sum())
+        diag["gstr2b_gstin_clean_empty_count"] = int((gstr2b["GSTIN_CLEAN"] == "").sum())
+        diag["books_gstin_clean_nunique"] = int(books["GSTIN_CLEAN"].nunique())
+
+        # Tax structure
+        def compute_tax_structure(df):
+            igst = df["IGST"]
+            cgst = df["CGST"]
+            sgst = df["SGST"]
+            cond_igst = (igst > 0) & (cgst == 0) & (sgst == 0)
+            cond_cgst_sgst = (igst == 0) & (cgst > 0) & (sgst > 0)
+            return np.select([cond_igst, cond_cgst_sgst], ["IGST", "CGST_SGST"], default="OTHER")
+
+        gstr2b["TAX_STRUCTURE"] = compute_tax_structure(gstr2b)
+        books["TAX_STRUCTURE"] = compute_tax_structure(books)
+
+        # Step 5A
+        gstr2b_idx = defaultdict(list)
+        for row in gstr2b.itertuples():
+            inv_c = getattr(row, "Invoice_No_CLEAN", "")
+            gst_c = getattr(row, "GSTIN_CLEAN", "")
+            tax_s = getattr(row, "TAX_STRUCTURE", "")
+            if inv_c != "" and gst_c != "":
+                gstr2b_idx[(gst_c, inv_c, tax_s)].append(row.Index)
+            elif inv_c != "":
+                gstr2b_idx[("", inv_c, tax_s)].append(row.Index)
+
+        used_gstr2b = set()
+        used_books = set()
+        matched_books_indices = []
+        matched_gstr2b_indices = []
+
+        gstr2b_igst = gstr2b["IGST"].to_dict()
+        gstr2b_cgst = gstr2b["CGST"].to_dict()
+        gstr2b_sgst = gstr2b["SGST"].to_dict()
+
+        valid_books = books[books["Invoice_No_CLEAN"] != ""]
+        if not valid_books.empty:
+            books_grouped = valid_books.groupby(["GSTIN_CLEAN", "Invoice_No_CLEAN"])
+            books_agg = books_grouped.agg({
+                "IGST": "sum",
+                "CGST": "sum",
+                "SGST": "sum",
+                "TAX_STRUCTURE": "first"
+            })
+            books_group_indices = books_grouped.indices
+
+            for (gst_c, inv_c), row_agg in books_agg.iterrows():
+                tax_struct = row_agg["TAX_STRUCTURE"]
+                candidates = [j for j in gstr2b_idx.get((gst_c, inv_c, tax_struct), []) if j not in used_gstr2b]
+                if not candidates and gst_c == "":
+                    candidates = [j for j in gstr2b_idx.get(("", inv_c, tax_struct), []) if j not in used_gstr2b]
+                if not candidates:
+                    continue
+
+                ig_s = row_agg["IGST"]
+                cg_s = row_agg["CGST"]
+                sg_s = row_agg["SGST"]
+
+                for j in candidates:
+                    if (
+                        abs(gstr2b_igst[j] - ig_s) <= TOLERANCE and
+                        abs(gstr2b_cgst[j] - cg_s) <= TOLERANCE and
+                        abs(gstr2b_sgst[j] - sg_s) <= TOLERANCE
+                    ):
+                        grp = list(books_group_indices[(gst_c, inv_c)])
+                        matched_books_indices.extend(grp)
+                        matched_gstr2b_indices.append(j)
+                        used_books.update(grp)
+                        used_gstr2b.add(j)
+                        break
+
+        diag["step5a_books_matched"] = len(matched_books_indices)
+        diag["step5a_gstr2b_matched"] = len(matched_gstr2b_indices)
+
+        # Step 5B
+        gstr2b_gstin_tax_buckets = defaultdict(list)
+        for row in gstr2b.itertuples():
+            if row.Index not in used_gstr2b:
+                gst_c = getattr(row, "GSTIN_CLEAN", "")
+                if gst_c != "":
+                    key = (
+                        gst_c,
+                        getattr(row, "TAX_STRUCTURE", ""),
+                        int(round(gstr2b_igst[row.Index])),
+                        int(round(gstr2b_cgst[row.Index])),
+                        int(round(gstr2b_sgst[row.Index]))
+                    )
+                    gstr2b_gstin_tax_buckets[key].append(row.Index)
+
+        books_igst = books["IGST"].to_dict()
+        books_cgst = books["CGST"].to_dict()
+        books_sgst = books["SGST"].to_dict()
+        books_tax = books["TAX_STRUCTURE"].to_dict()
+        books_gstin = books["GSTIN_CLEAN"].to_dict()
+
+        for b_idx in books.index:
+            if b_idx in used_books:
+                continue
+            gst_c = books_gstin.get(b_idx, "")
+            if not gst_c:
+                continue
+
+            tax_struct = books_tax.get(b_idx, "")
+            ig_val = books_igst.get(b_idx, 0)
+            cg_val = books_cgst.get(b_idx, 0)
+            sg_val = books_sgst.get(b_idx, 0)
+
+            round_ig = int(round(ig_val))
+            round_cg = int(round(cg_val))
+            round_sg = int(round(sg_val))
+
+            found = False
+            for d_i in (0, -1, 1):
+                for d_c in (0, -1, 1):
+                    for d_s in (0, -1, 1):
+                        search_key = (gst_c, tax_struct, round_ig + d_i, round_cg + d_c, round_sg + d_s)
+                        candidates = gstr2b_gstin_tax_buckets.get(search_key)
+                        if not candidates:
+                            continue
+                        for j in candidates:
+                            if j in used_gstr2b:
+                                continue
+                            if (
+                                abs(gstr2b_igst[j] - ig_val) <= TOLERANCE and
+                                abs(gstr2b_cgst[j] - cg_val) <= TOLERANCE and
+                                abs(gstr2b_sgst[j] - sg_val) <= TOLERANCE
+                            ):
+                                matched_books_indices.append(b_idx)
+                                matched_gstr2b_indices.append(j)
+                                used_books.add(b_idx)
+                                used_gstr2b.add(j)
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+
+        diag["total_books_matched"] = len(matched_books_indices)
+        diag["total_gstr2b_matched"] = len(matched_gstr2b_indices)
+        diag["step5b_books_added"] = len(matched_books_indices) - diag["step5a_books_matched"]
+
+        # Cleanup
+        try:
+            os.remove(input_path)
+        except Exception:
+            pass
+
+        return diag
+
+    except Exception as e:
+        import traceback
+        diag["error"] = str(e)
+        diag["traceback"] = traceback.format_exc()
+        return diag, 500
 
 @app.route('/download-template')
 def download_template():
