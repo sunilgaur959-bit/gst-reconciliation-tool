@@ -397,7 +397,7 @@ def version():
     import sys, numpy as np
     return {
         "status": "online",
-        "version": "v6.0-diagnose",
+        "version": "v7.0-iround-fix",
         "python": sys.version,
         "pandas": pd.__version__,
         "numpy": np.__version__,
@@ -406,7 +406,7 @@ def version():
 @app.route('/diagnose', methods=['POST'])
 def diagnose():
     """Diagnostic endpoint: upload a file and get JSON match diagnostics."""
-    import sys, numpy as np, json
+    import sys, math, numpy as np, json
     from collections import defaultdict
 
     diag = {
@@ -549,9 +549,9 @@ def diagnose():
                     key = (
                         gst_c,
                         getattr(row, "TAX_STRUCTURE", ""),
-                        int(round(gstr2b_igst[row.Index])),
-                        int(round(gstr2b_cgst[row.Index])),
-                        int(round(gstr2b_sgst[row.Index]))
+                        int(math.floor(float(gstr2b_igst[row.Index]) + 0.5)),
+                        int(math.floor(float(gstr2b_cgst[row.Index]) + 0.5)),
+                        int(math.floor(float(gstr2b_sgst[row.Index]) + 0.5))
                     )
                     gstr2b_gstin_tax_buckets[key].append(row.Index)
 
@@ -573,9 +573,9 @@ def diagnose():
             cg_val = books_cgst.get(b_idx, 0)
             sg_val = books_sgst.get(b_idx, 0)
 
-            round_ig = int(round(ig_val))
-            round_cg = int(round(cg_val))
-            round_sg = int(round(sg_val))
+            round_ig = int(math.floor(float(ig_val) + 0.5))
+            round_cg = int(math.floor(float(cg_val) + 0.5))
+            round_sg = int(math.floor(float(sg_val) + 0.5))
 
             found = False
             for d_i in (0, -1, 1):
