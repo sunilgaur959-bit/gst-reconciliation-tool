@@ -397,10 +397,17 @@ def version():
     import sys, numpy as np
     return {
         "status": "online",
-        "version": "v7.0-iround-fix",
+        "version": "v8.0-debug-source",
         "python": sys.version,
         "pandas": pd.__version__,
         "numpy": np.__version__,
+    }
+
+@app.route('/debug-source')
+def debug_source():
+    import inspect
+    return {
+        "source": inspect.getsource(process_reconciliation)
     }
 
 @app.route('/diagnose', methods=['POST'])
